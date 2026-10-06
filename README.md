@@ -44,7 +44,7 @@ docker compose up -d --build      # 代码改动后重新构建
 | 构建工具 | Vite 5 | 开发服务器端口 22818 |
 | 状态管理 | Zustand 4 | `bodyStore` / `coatStore` / `roomStore` |
 | 路由 | React Router 6（`createBrowserRouter`，history 模式） | nginx 侧配合 `try_files` 做 SPA fallback |
-| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 含数据结构版本号与 v1→v2 升级迁移 |
+| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 含数据结构版本号与 v1→v3 升级迁移 |
 | 容器化 | Docker 多阶段构建：`node:20-alpine` → `nginx:alpine` | 构建阶段类型检查 + 打包，运行阶段仅托管静态产物 |
 
 ---
@@ -68,9 +68,9 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | 路由 | 页面 | 主要职责 | 消费模型 |
 | --- | --- | --- | --- |
 | `/bodies` | 胎体与器型台账 | 新建胎体、按材质与器型筛选（同步 URL query），卡片回显已完成道次与最近荫房记录 | Body、Coat、Room |
-| `/coats` | 髹涂道次编排 | 拖拽调整道次先后并重编号、批量改漆种与状态、同器型自动带出上次漆种与间隔建议 | Coat、Body |
+| `/coats` | 髹涂道次编排 | 拖拽调整道次先后并重编号、批量改漆种与状态、同器型自动带出上次漆种与间隔建议；打磨结论并列「实时重算 / 补磨冻结」两种口径，不一致标「已翻盘」 | Coat、Body、Polish |
 | `/rooms` | 荫房温湿度记录 | 按区间判定适宜 / 偏干 / 偏湿，越界回写关联道次为「待复检」，支持日期区间筛选 | Room、Coat |
-| `/polish` | 打磨与推光工序 | 按道次生成目数序列（320→2000），未打磨完的道次禁止进入下一道罩漆 | Polish、Coat |
+| `/polish` | 打磨与推光工序 | 按道次生成目数序列（320→2000），每条记录可补记一次补磨（日期/目数/操作人），磨到位判定与最高目数按补磨后的数；补磨比原记录粗的标「返工待确认」 | Polish、Coat |
 | `/inlays` | 镶嵌纹饰登记 | 螺钿 / 蛋壳 / 描金 / 戗金登记与批量调整分类，器型示意区叠加显示 | Inlay、Body |
 | `/export` | 成品质检与导出 | 质检登记（返工定位到具体道次与荫房记录）、返工清单、JSON 导入导出与清空重播种 | Inspect 及全部模型 |
 
@@ -83,13 +83,13 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | 模型 | 文件 | 关键字段 | 说明 |
 | --- | --- | --- | --- |
 | Body 胎体 | `src/types/body.ts` | `id` `code` `material`（木/脱胎/金属） `shape`（碗/盘/盒/瓶） `sizeMm` `ownerName` `state`（待髹涂/髹涂中/待荫干/已完成） | 新建后进入道次编排，卡片回显进度与最近荫房 |
-| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `needRecheck` | 拖拽调序，同器型带出上次漆种与间隔建议 |
+| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `needRecheck` `polishFreeze`（补磨冻结结论） | 拖拽调序，同器型带出上次漆种与间隔建议；补磨登记时冻结打磨结论、之后不回头 |
 | Room 荫房记录 | `src/types/room.ts` | `id` `bodyId` `date` `tempC` `humidityPct` `inAt` `outAt` `verdict`（适宜/偏干/偏湿） | 越界即回写关联道次为待复检 |
-| Polish 打磨推光 | `src/types/polish.ts` | `id` `bodyId` `seq` `grit` `method`（水砂/推光/揩清） `durationMin` `operator` | 按道次生成目数序列 |
+| Polish 打磨推光 | `src/types/polish.ts` | `id` `bodyId` `seq` `grit` `method`（水砂/推光/揩清） `durationMin` `operator` `rework`（补磨日期/目数/操作人，限一次） | 按道次生成目数序列；补磨后各页面按补磨后的目数计算 |
 | Inlay 镶嵌 | `src/types/inlay.ts` | `id` `bodyId` `type`（螺钿/蛋壳/描金/戗金） `pattern` `position` `materialNote` | 器型示意区叠加显示，支持批量改分类 |
 | Inspect 质检 | `src/types/inspect.ts` | `id` `bodyId` `verdict`（合格/返工） `defectNote` `inspector` `date` `defectCoatSeq` `defectRoomId` | 返工定位到道次与荫房记录并生成返工清单 |
 
-数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`coats` 表增加 `paintType` 索引，并在 Dexie `.upgrade()` 中为历史记录回填 `paintType = 'raw'`、`needRecheck = false`、`thicknessUm = 40`。
+数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：`v1→v2` 为 `coats` 表增加 `paintType` 索引并回填历史记录；`v2→v3` 为 `polishes` 增加补磨子记录 `rework`、`coats` 增加补磨冻结结论 `polishFreeze`，历史记录回填 `null`（索引不变）。
 
 ---
 

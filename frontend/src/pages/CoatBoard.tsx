@@ -1,7 +1,9 @@
 /**
  * /coats 髹涂道次编排
  * 拖拽调整道次先后、批量改漆种与状态、同器型自动带出上次漆种与间隔建议。
- * 消费 Coat、Body；复用 <StageTag>、<FilterBar>、<StatBadge>、<EmptyPanel>。
+ * 打磨结论双口径并列：「实时重算」随补磨登记/修改/撤销当场翻盘；
+ * 「补磨冻结」在补磨登记时写进道次、之后不再回头，两者不一致时标「已翻盘」。
+ * 消费 Coat、Body、Polish；复用 <StageTag>、<FilterBar>、<StatBadge>、<EmptyPanel>。
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -34,6 +36,7 @@ import FilterBar, { useFilterQuery, type FilterSelectConfig } from '@/components
 import StatBadge from '@/components/common/StatBadge';
 import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
+import { useIdbTable } from '@/hooks/useIdbTable';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
 import {
@@ -48,6 +51,7 @@ import {
   type CoatState,
   type PaintType,
 } from '@/types/coat';
+import { summarizeSeqPolish, type Polish } from '@/types/polish';
 import { BODY_SHAPE_LABEL } from '@/types/body';
 import { suggestIntervalHours } from '@/utils/humidity';
 
@@ -57,6 +61,14 @@ const FILTER_SELECTS: ReadonlyArray<FilterSelectConfig> = [
   { key: 'paintType', label: '漆种', options: PAINT_TYPE_OPTIONS },
   { key: 'state', label: '状态', options: COAT_STATE_OPTIONS },
 ];
+
+/** 时间戳 → yyyy-MM-dd（本地时区），补磨冻结结论回显用 */
+function formatDay(at: number): string {
+  const d = new Date(at);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
 
 export default function CoatBoard() {
   const { message } = AntdApp.useApp();
@@ -77,6 +89,7 @@ export default function CoatBoard() {
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
+  const polishTable = useIdbTable<Polish>((database) => database.polishes, { sortByUpdatedAt: false });
 
   const [editing, setEditing] = useState<Coat | null>(null);
   const [open, setOpen] = useState(false);
@@ -96,6 +109,12 @@ export default function CoatBoard() {
   const bodyCoats = useMemo(
     () => coats.filter((coat) => coat.bodyId === bodyId).sort((a, b) => a.seq - b.seq),
     [coats, bodyId],
+  );
+
+  /** 当前胎体的打磨记录：打磨结论（实时重算口径）与阶段标签目数都从这里取 */
+  const bodyPolishes = useMemo(
+    () => polishTable.rows.filter((row) => row.bodyId === bodyId),
+    [polishTable.rows, bodyId],
   );
 
   const filtered = useMemo(() => {
@@ -212,11 +231,19 @@ export default function CoatBoard() {
     {
       title: '道次',
       dataIndex: 'seq',
-      width: 90,
+      width: 170,
       sorter: (a, b) => a.seq - b.seq,
-      render: (seq: number, record) => (
-        <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
-      ),
+      render: (seq: number, record) => {
+        const summary = summarizeSeqPolish(seq, bodyPolishes);
+        return (
+          <StageTag
+            state={record.state}
+            seq={seq}
+            needRecheck={record.needRecheck}
+            suffix={summary.rowCount > 0 ? `磨至 ${summary.maxGrit} 目` : undefined}
+          />
+        );
+      },
     },
     { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
     { title: '色名', dataIndex: 'colorName', width: 120 },
@@ -226,6 +253,49 @@ export default function CoatBoard() {
       dataIndex: 'thicknessUm',
       width: 120,
       render: (value: number) => `${value} μm`,
+    },
+    {
+      title: '打磨结论（实时重算 / 补磨冻结）',
+      key: 'polishVerdict',
+      width: 330,
+      render: (_value, record) => {
+        const summary = summarizeSeqPolish(record.seq, bodyPolishes);
+        const freeze = record.polishFreeze ?? null;
+        const flipped =
+          freeze !== null &&
+          (summary.rowCount === 0 || summary.maxGrit !== freeze.grit || summary.settled !== freeze.settled);
+        return (
+          <Space direction="vertical" size={2}>
+            <Space size={4} wrap>
+              <Typography.Text type="secondary">实时重算</Typography.Text>
+              {summary.rowCount === 0 ? (
+                <Tag>未登记打磨</Tag>
+              ) : summary.needConfirm ? (
+                <Tooltip title="补磨目数比原记录粗，需确认后才能放行">
+                  <Tag color="warning">返工待确认 · {summary.maxGrit} 目</Tag>
+                </Tooltip>
+              ) : summary.settled ? (
+                <Tag color="success">磨到位 · {summary.maxGrit} 目</Tag>
+              ) : (
+                <Tag color="error">未磨到位 · {summary.maxGrit} 目</Tag>
+              )}
+              {flipped ? (
+                <Tooltip title="补磨被改或被撤后，实时口径已按现有记录重算并翻盘；冻结口径仍停留在补磨登记当时">
+                  <Tag color="orange">已翻盘</Tag>
+                </Tooltip>
+              ) : null}
+            </Space>
+            <Space size={4} wrap>
+              <Typography.Text type="secondary">补磨冻结</Typography.Text>
+              {freeze ? (
+                <Tag>{`${freeze.grit} 目 · ${freeze.settled ? '磨到位' : '未到位'} · ${formatDay(freeze.at)} 冻结`}</Tag>
+              ) : (
+                <Typography.Text type="secondary">无补磨，随原记录</Typography.Text>
+              )}
+            </Space>
+          </Space>
+        );
+      },
     },
     {
       title: '操作',
@@ -382,6 +452,7 @@ export default function CoatBoard() {
             rowKey="id"
             size="small"
             pagination={false}
+            scroll={{ x: 1240 }}
             columns={columns}
             dataSource={filtered}
             onRow={(record) => ({
@@ -403,6 +474,9 @@ export default function CoatBoard() {
 
       <Typography.Text type="secondary" style={{ display: 'block', marginTop: 10 }}>
         当前胎体进度：{bodyId ? currentCoatText(bodyId) : '未选择胎体'}
+      </Typography.Text>
+      <Typography.Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
+        打磨结论两种口径：「实时重算」随补磨登记 / 修改 / 撤销当场翻盘；「补磨冻结」在补磨登记时写进道次、之后不再回头。两者不一致时标「已翻盘」。
       </Typography.Text>
 
       <Modal

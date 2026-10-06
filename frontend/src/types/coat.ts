@@ -9,6 +9,19 @@ export type PaintType = 'raw' | 'color' | 'topcoat';
 /** 道次状态：待涂 / 已涂 / 待打磨 / 已完成 */
 export type CoatState = 'todo' | 'coated' | 'toPolish' | 'done';
 
+/**
+ * 补磨登记时写进道次的打磨结论快照：
+ * 之后不再随打磨记录改动（不回头），与「按现有记录实时重算」的口径并存对照。
+ */
+export interface CoatPolishFreeze {
+  /** 冻结时该道次的最高有效目数（即补磨后的数） */
+  grit: number;
+  /** 冻结时这道算不算磨到位 */
+  settled: boolean;
+  /** 冻结时间戳 */
+  at: number;
+}
+
 export interface Coat {
   id: string;
   /** 所属胎体 id */
@@ -27,6 +40,8 @@ export interface Coat {
   state: CoatState;
   /** 荫房判定异常时回写的「待复检」标记 */
   needRecheck: boolean;
+  /** 补磨登记时冻结的打磨结论；null 表示该道从未登记补磨 */
+  polishFreeze: CoatPolishFreeze | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -91,5 +106,6 @@ export function createEmptyCoatDraft(bodyId: string, seq: number): CoatDraft {
     thicknessUm: 40,
     state: 'todo',
     needRecheck: false,
+    polishFreeze: null,
   };
 }
