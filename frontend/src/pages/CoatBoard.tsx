@@ -34,6 +34,7 @@ import FilterBar, { useFilterQuery, type FilterSelectConfig } from '@/components
 import StatBadge from '@/components/common/StatBadge';
 import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
+import { useIdbTable } from '@/hooks/useIdbTable';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
 import {
@@ -45,9 +46,12 @@ import {
   createEmptyCoatDraft,
   type Coat,
   type CoatDraft,
+  type CoatPolishStamp,
   type CoatState,
   type PaintType,
 } from '@/types/coat';
+import { POLISH_VERDICT_LABEL, type Polish } from '@/types/polish';
+import { effectivePolishBySeq, isStampStale, type EffectivePolish } from '@/utils/polish';
 import { BODY_SHAPE_LABEL } from '@/types/body';
 import { suggestIntervalHours } from '@/utils/humidity';
 
@@ -78,6 +82,9 @@ export default function CoatBoard() {
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
 
+  // 打磨记录：实时口径（按现有记录重算、当场翻盘）的数据源
+  const polishTable = useIdbTable<Polish>((database) => database.polishes, { sortByUpdatedAt: false });
+
   const [editing, setEditing] = useState<Coat | null>(null);
   const [open, setOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -96,6 +103,22 @@ export default function CoatBoard() {
   const bodyCoats = useMemo(
     () => coats.filter((coat) => coat.bodyId === bodyId).sort((a, b) => a.seq - b.seq),
     [coats, bodyId],
+  );
+
+  /** 当前胎体：道次序号 → 按现有记录实时重算的打磨结论 */
+  const polishBySeq = useMemo(
+    () => effectivePolishBySeq(polishTable.rows.filter((row) => row.bodyId === bodyId)),
+    [polishTable.rows, bodyId],
+  );
+
+  /** 实时结论与道次留档已翻盘的道次（两种做法的差别） */
+  const staleCoats = useMemo(
+    () =>
+      bodyCoats.filter((coat) => {
+        const effective = polishBySeq.get(coat.seq);
+        return effective ? isStampStale(coat.polishStamp, effective) : false;
+      }),
+    [bodyCoats, polishBySeq],
   );
 
   const filtered = useMemo(() => {
@@ -210,13 +233,28 @@ export default function CoatBoard() {
       ),
     },
     {
-      title: '道次',
+      title: '道次（实时口径）',
       dataIndex: 'seq',
-      width: 90,
+      width: 250,
       sorter: (a, b) => a.seq - b.seq,
-      render: (seq: number, record) => (
-        <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
-      ),
+      render: (seq: number, record) => {
+        const effective = polishBySeq.get(seq);
+        return (
+          <StageTag
+            state={record.state}
+            seq={seq}
+            needRecheck={record.needRecheck}
+            grit={effective?.exists ? effective.grit : undefined}
+            polishPending={effective?.exists ? effective.verdict === 'reworkPending' : false}
+          />
+        );
+      },
+    },
+    {
+      title: '打磨留档（盖戳不回头）',
+      key: 'polishStamp',
+      width: 220,
+      render: (_value, record) => <PolishStampTag stamp={record.polishStamp} effective={polishBySeq.get(record.seq)} />,
     },
     { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
     { title: '色名', dataIndex: 'colorName', width: 120 },
@@ -309,6 +347,24 @@ export default function CoatBoard() {
           }
         />
       ) : null}
+
+      {staleCoats.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`第 ${staleCoats.map((coat) => coat.seq).join('、')} 道实时打磨结论与道次留档不一致（已翻盘 ${staleCoats.length} 道）`}
+          description="「实时口径」每次按现有打磨记录重算，补磨事后被改 / 被撤会当场翻盘；「留档口径」是补磨登记或放行当时写进道次的结论，之后不再回头。髹涂台放行前请确认以哪个为准。"
+        />
+      ) : (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message="打磨双口径一致：实时重算结论与道次留档没有出入"
+          description="补磨登记当时会把结论盖进道次；若事后修改或撤回补磨，实时口径当场翻盘，留档保持不动，两列差别即在此提示。"
+        />
+      )}
 
       <FilterBar
         keyword={url.keyword}
@@ -461,5 +517,40 @@ export default function CoatBoard() {
         </Form>
       </Modal>
     </div>
+  );
+}
+
+/** 道次留档标签：补磨/放行当时写进道次的结论；与实时口径不一致时标红 */
+function PolishStampTag({ stamp, effective }: { stamp: CoatPolishStamp | null; effective: EffectivePolish | undefined }) {
+  if (!stamp) {
+    return <Typography.Text type="secondary">未盖戳</Typography.Text>;
+  }
+  const stale = effective ? isStampStale(stamp, effective) : false;
+  const stampDate = new Date(stamp.stampedAt);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const stampedText = `${stampDate.getFullYear()}-${pad(stampDate.getMonth() + 1)}-${pad(stampDate.getDate())}`;
+  const title = [
+    `盖戳来源：${stamp.source === 'touchUp' ? '补磨登记' : '完成打磨放行'}`,
+    `盖戳日期：${stampedText}`,
+    `算数目数：${stamp.grit} 目`,
+    `结论：${POLISH_VERDICT_LABEL[stamp.verdict]}`,
+    `操作人：${stamp.operator || '未填写'}`,
+    stamp.date ? `作业日期：${stamp.date}` : null,
+    stale ? '与现有打磨记录重算结果不一致（实时口径已翻盘，留档不回头）' : null,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return (
+    <Tooltip title={<pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{title}</pre>}>
+      <Space size={4} wrap>
+        <Tag color={stale ? 'error' : 'default'} style={{ fontWeight: stale ? 600 : 400 }}>
+          {stamp.grit} 目
+        </Tag>
+        <Tag color={stamp.verdict === 'reworkPending' ? 'error' : stale ? 'warning' : 'success'}>
+          {POLISH_VERDICT_LABEL[stamp.verdict]}
+        </Tag>
+        {stale ? <Tag color="error">已翻盘</Tag> : null}
+      </Space>
+    </Tooltip>
   );
 }

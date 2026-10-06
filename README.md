@@ -70,7 +70,7 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | `/bodies` | 胎体与器型台账 | 新建胎体、按材质与器型筛选（同步 URL query），卡片回显已完成道次与最近荫房记录 | Body、Coat、Room |
 | `/coats` | 髹涂道次编排 | 拖拽调整道次先后并重编号、批量改漆种与状态、同器型自动带出上次漆种与间隔建议 | Coat、Body |
 | `/rooms` | 荫房温湿度记录 | 按区间判定适宜 / 偏干 / 偏湿，越界回写关联道次为「待复检」，支持日期区间筛选 | Room、Coat |
-| `/polish` | 打磨与推光工序 | 按道次生成目数序列（320→2000），未打磨完的道次禁止进入下一道罩漆 | Polish、Coat |
+| `/polish` | 打磨与推光工序 | 按道次生成目数序列（320→2000），每条打磨可补记一次补磨（日期/目数/操作人）；到位判定、页顶最高目数、道次页阶段标签一律按补磨后的数算，补磨回粗砂标「返工待确认」，未打磨完的道次禁止进入下一道罩漆 | Polish、Coat |
 | `/inlays` | 镶嵌纹饰登记 | 螺钿 / 蛋壳 / 描金 / 戗金登记与批量调整分类，器型示意区叠加显示 | Inlay、Body |
 | `/export` | 成品质检与导出 | 质检登记（返工定位到具体道次与荫房记录）、返工清单、JSON 导入导出与清空重播种 | Inspect 及全部模型 |
 
@@ -83,13 +83,22 @@ npm run preview    # 本地预览构建产物（http://localhost:22818）
 | 模型 | 文件 | 关键字段 | 说明 |
 | --- | --- | --- | --- |
 | Body 胎体 | `src/types/body.ts` | `id` `code` `material`（木/脱胎/金属） `shape`（碗/盘/盒/瓶） `sizeMm` `ownerName` `state`（待髹涂/髹涂中/待荫干/已完成） | 新建后进入道次编排，卡片回显进度与最近荫房 |
-| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `needRecheck` | 拖拽调序，同器型带出上次漆种与间隔建议 |
+| Coat 髹涂道次 | `src/types/coat.ts` | `id` `bodyId` `seq` `paintType`（生漆/色漆/罩漆） `colorName` `coatDate` `thicknessUm` `state`（待涂/已涂/待打磨/已完成） `needRecheck` `polishStamp`（打磨结论留档） | 拖拽调序，同器型带出上次漆种与间隔建议；`polishStamp` 在补磨登记/放行当时盖戳，事后不回头 |
 | Room 荫房记录 | `src/types/room.ts` | `id` `bodyId` `date` `tempC` `humidityPct` `inAt` `outAt` `verdict`（适宜/偏干/偏湿） | 越界即回写关联道次为待复检 |
-| Polish 打磨推光 | `src/types/polish.ts` | `id` `bodyId` `seq` `grit` `method`（水砂/推光/揩清） `durationMin` `operator` | 按道次生成目数序列 |
+| Polish 打磨推光 | `src/types/polish.ts` | `id` `bodyId` `seq` `grit` `method`（水砂/推光/揩清） `durationMin` `operator` `touchUp`（补磨：日期/目数/操作人） | 每条至多补记一次补磨；无补磨按原记录算，有补磨按补磨后的数算；补磨目数更粗判「返工待确认」 |
 | Inlay 镶嵌 | `src/types/inlay.ts` | `id` `bodyId` `type`（螺钿/蛋壳/描金/戗金） `pattern` `position` `materialNote` | 器型示意区叠加显示，支持批量改分类 |
 | Inspect 质检 | `src/types/inspect.ts` | `id` `bodyId` `verdict`（合格/返工） `defectNote` `inspector` `date` `defectCoatSeq` `defectRoomId` | 返工定位到道次与荫房记录并生成返工清单 |
 
-数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`coats` 表增加 `paintType` 索引，并在 Dexie `.upgrade()` 中为历史记录回填 `paintType = 'raw'`、`needRecheck = false`、`thicknessUm = 40`。
+数据结构版本号 `DB_SCHEMA_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：
+- v1→v2：`coats` 表增加 `paintType` 索引，并在 Dexie `.upgrade()` 中为历史记录回填 `paintType = 'raw'`、`needRecheck = false`、`thicknessUm = 40`。
+- v2→v3：`polishes` 增加 `touchUp`（一次补磨：日期/目数/操作人），`coats` 增加 `polishStamp`（打磨结论留档戳），均为非索引字段；升级时把历史记录回填为「无补磨 / 未盖戳」。
+
+### 补磨与两种结论口径
+
+- **补磨**：同一道先粗磨、几天后看出花印再补磨，不再拆成两条独立记录，而是在原打磨记录上补记一次 `touchUp`（补磨日期、目数、操作人）。未补磨的仍按原记录算；有补磨的，这道算不算磨到位、打磨页顶部「最高目数」、道次页阶段标签都改用补磨后的数。补磨目数比原记录粗（目数更小）的，整条标「返工待确认」，髹涂台不得放行。
+- **实时口径（按现有记录重算、当场翻盘）**：`src/utils/polish.ts` 的 `effectivePolishOfSeq()` 每次由当前打磨记录重算，补磨事后被改或被撤，结论立即翻盘。
+- **留档口径（补磨当时写进道次、之后不再回头）**：补磨登记（以及首次「完成打磨」放行）当时把结论盖成 `Coat.polishStamp`，之后修改/撤回补磨都不改动它。
+- 道次页（`/coats`）并排展示两列：「道次（实时口径）」与「打磨留档（盖戳不回头）」；两列不一致时顶部给出「已翻盘」提示，行内留档标签标红，悬停可查盖戳来源、日期与当时结论。
 
 ---
 
@@ -105,7 +114,7 @@ sologsb101-1018/
 │   │   ├── hooks/                # useCoatProgress.ts useIdbTable.ts
 │   │   ├── pages/                # BodyList.tsx CoatBoard.tsx RoomLog.tsx PolishBoard.tsx InlayBoard.tsx ExportView.tsx
 │   │   ├── router/               # index.tsx
-│   │   ├── utils/                # humidity.ts db.ts export.ts
+│   │   ├── utils/                # humidity.ts polish.ts db.ts export.ts
 │   │   ├── styles/               # main.css
 │   │   ├── App.tsx main.tsx
 │   ├── public/favicon.svg

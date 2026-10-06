@@ -16,8 +16,10 @@ import type { Inspect } from '@/types/inspect';
 /** 数据库名（README 与导出文件均使用该名称） */
 export const DB_NAME = 'gblacquer';
 
-/** 当前数据结构版本号 */
-export const DB_SCHEMA_VERSION = 2;
+/** 当前数据结构版本号
+ * v2：Coat 增加 paintType 索引并回填历史记录
+ * v3：Polish 增加补磨记录（touchUp），Coat 增加打磨结论留档（polishStamp），均非索引字段 */
+export const DB_SCHEMA_VERSION = 3;
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -119,6 +121,32 @@ class LacquerDatabase extends Dexie {
             if (typeof coat.thicknessUm !== 'number') coat.thicknessUm = 40;
           });
       });
+
+    // v3：Polish 增加一次补磨记录 touchUp，Coat 增加打磨结论留档 polishStamp（非索引字段，沿用既有索引）
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        bodies: 'id, code, material, shape, state, updatedAt',
+        coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
+        rooms: 'id, bodyId, date, verdict, updatedAt',
+        polishes: 'id, bodyId, seq, method, updatedAt',
+        inlays: 'id, bodyId, type, position, updatedAt',
+        inspects: 'id, bodyId, verdict, date, updatedAt',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Polish>('polishes')
+          .toCollection()
+          .modify((polish) => {
+            // 历史打磨记录无补磨字段，按「未补磨」处理
+            if (polish.touchUp === undefined) polish.touchUp = null;
+          });
+        await tx
+          .table<Coat>('coats')
+          .toCollection()
+          .modify((coat) => {
+            if (coat.polishStamp === undefined) coat.polishStamp = null;
+          });
+      });
   }
 }
 
@@ -184,14 +212,14 @@ export async function seedDatabase(): Promise<void> {
   ];
 
   const coats: Coat[] = [
-    { id: 'coat_0101', bodyId: 'body_01', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-02', thicknessUm: 40, state: 'done', needRecheck: false, createdAt: now - 86400000 * 11, updatedAt: now - 86400000 * 10 },
-    { id: 'coat_0102', bodyId: 'body_01', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '2026-03-06', thicknessUm: 45, state: 'toPolish', needRecheck: true, createdAt: now - 86400000 * 7, updatedAt: now - 86400000 * 2 },
-    { id: 'coat_0103', bodyId: 'body_01', seq: 3, paintType: 'topcoat', colorName: '推光本色', coatDate: '2026-03-12', thicknessUm: 30, state: 'todo', needRecheck: false, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
-    { id: 'coat_0201', bodyId: 'body_02', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-03', thicknessUm: 35, state: 'done', needRecheck: false, createdAt: now - 86400000 * 8, updatedAt: now - 86400000 * 7 },
-    { id: 'coat_0202', bodyId: 'body_02', seq: 2, paintType: 'color', colorName: '赭石', coatDate: '2026-03-08', thicknessUm: 42, state: 'coated', needRecheck: true, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
-    { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', needRecheck: false, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
-    { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', needRecheck: false, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
-    { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', needRecheck: false, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
+    { id: 'coat_0101', bodyId: 'body_01', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-02', thicknessUm: 40, state: 'done', needRecheck: false, polishStamp: { grit: 1000, verdict: 'done', operator: '王丽', date: '2026-03-08', source: 'touchUp', stampedAt: now - 86400000 * 8 }, createdAt: now - 86400000 * 11, updatedAt: now - 86400000 * 8 },
+    { id: 'coat_0102', bodyId: 'body_01', seq: 2, paintType: 'color', colorName: '朱红', coatDate: '2026-03-06', thicknessUm: 45, state: 'toPolish', needRecheck: true, polishStamp: { grit: 800, verdict: 'reworkPending', operator: '李成', date: '2026-03-10', source: 'touchUp', stampedAt: now - 86400000 }, createdAt: now - 86400000 * 7, updatedAt: now - 86400000 },
+    { id: 'coat_0103', bodyId: 'body_01', seq: 3, paintType: 'topcoat', colorName: '推光本色', coatDate: '2026-03-12', thicknessUm: 30, state: 'todo', needRecheck: false, polishStamp: null, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
+    { id: 'coat_0201', bodyId: 'body_02', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-03', thicknessUm: 35, state: 'done', needRecheck: false, polishStamp: { grit: 800, verdict: 'done', operator: '李成', date: null, source: 'finish', stampedAt: now - 86400000 * 6 }, createdAt: now - 86400000 * 8, updatedAt: now - 86400000 * 6 },
+    { id: 'coat_0202', bodyId: 'body_02', seq: 2, paintType: 'color', colorName: '赭石', coatDate: '2026-03-08', thicknessUm: 42, state: 'coated', needRecheck: true, polishStamp: null, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
+    { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', needRecheck: false, polishStamp: null, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
+    { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', needRecheck: false, polishStamp: null, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
+    { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', needRecheck: false, polishStamp: { grit: 2000, verdict: 'done', operator: '王丽', date: null, source: 'finish', stampedAt: now - 86400000 * 4 }, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
   ];
 
   const rooms: Room[] = [
@@ -202,10 +230,12 @@ export async function seedDatabase(): Promise<void> {
   ];
 
   const polishes: Polish[] = [
-    { id: 'polish_0101', bodyId: 'body_01', seq: 1, grit: 600, method: 'water', durationMin: 35, operator: '王丽', createdAt: now - 86400000 * 9, updatedAt: now - 86400000 * 9 },
-    { id: 'polish_0102', bodyId: 'body_01', seq: 2, grit: 1500, method: 'burnish', durationMin: 45, operator: '王丽', createdAt: now - 86400000 * 2, updatedAt: now - 86400000 * 2 },
-    { id: 'polish_0201', bodyId: 'body_02', seq: 1, grit: 800, method: 'water', durationMin: 30, operator: '李成', createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
-    { id: 'polish_0301', bodyId: 'body_03', seq: 3, grit: 2000, method: 'burnish', durationMin: 60, operator: '王丽', createdAt: now - 86400000 * 5, updatedAt: now - 86400000 * 4 },
+    // 演示「当场翻盘」：补磨先登记为 1000 目并盖进道次，事后又细磨到 1500 目，实时结论与留档不一致
+    { id: 'polish_0101', bodyId: 'body_01', seq: 1, grit: 600, method: 'water', durationMin: 35, operator: '王丽', touchUp: { date: '2026-03-12', grit: 1500, operator: '王丽' }, createdAt: now - 86400000 * 9, updatedAt: now - 86400000 * 3 },
+    // 演示「返工待确认」：原磨 1500 目，补磨仅 800 目（比原记录粗）
+    { id: 'polish_0102', bodyId: 'body_01', seq: 2, grit: 1500, method: 'burnish', durationMin: 45, operator: '王丽', touchUp: { date: '2026-03-10', grit: 800, operator: '李成' }, createdAt: now - 86400000 * 2, updatedAt: now - 86400000 },
+    { id: 'polish_0201', bodyId: 'body_02', seq: 1, grit: 800, method: 'water', durationMin: 30, operator: '李成', touchUp: null, createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 6 },
+    { id: 'polish_0301', bodyId: 'body_03', seq: 3, grit: 2000, method: 'burnish', durationMin: 60, operator: '王丽', touchUp: null, createdAt: now - 86400000 * 5, updatedAt: now - 86400000 * 4 },
   ];
 
   const inlays: Inlay[] = [
@@ -280,11 +310,20 @@ export function validateSnapshot(input: unknown): string {
 
 export async function importSnapshot(snapshot: LacquerSnapshot): Promise<void> {
   await clearAllTables();
+  // 兼容旧版备份（v2 及以前无补磨 / 留档字段）：导入时回填默认值
+  const polishes = snapshot.polishes.map((polish) => ({
+    ...polish,
+    touchUp: polish.touchUp ?? null,
+  }));
+  const coats = snapshot.coats.map((coat) => ({
+    ...coat,
+    polishStamp: coat.polishStamp ?? null,
+  }));
   await db.transaction('rw', TABLE_LIST, async () => {
     await db.bodies.bulkPut(snapshot.bodies);
-    await db.coats.bulkPut(snapshot.coats);
+    await db.coats.bulkPut(coats);
     await db.rooms.bulkPut(snapshot.rooms);
-    await db.polishes.bulkPut(snapshot.polishes);
+    await db.polishes.bulkPut(polishes);
     await db.inlays.bulkPut(snapshot.inlays);
     await db.inspects.bulkPut(snapshot.inspects);
   });

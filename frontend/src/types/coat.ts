@@ -3,11 +3,33 @@
  * 一件胎体上的逐道髹涂记录：漆种、色名、涂刷日期、湿膜厚度与状态推进。
  */
 
+import type { PolishVerdict } from './polish';
+
 /** 漆种：生漆 / 色漆 / 罩漆 */
 export type PaintType = 'raw' | 'color' | 'topcoat';
 
 /** 道次状态：待涂 / 已涂 / 待打磨 / 已完成 */
 export type CoatState = 'todo' | 'coated' | 'toPolish' | 'done';
+
+/**
+ * 打磨结论留档（写进道次、之后不再回头的做法）：
+ * 补磨登记或「完成打磨」放行的当时，按当时记录把结论盖在道次上；
+ * 之后补磨被改、被撤，留档保持不动，与按现有记录实时重算的结论形成对照。
+ */
+export interface CoatPolishStamp {
+  /** 盖戳当时算数的目数（补磨后目数） */
+  grit: number;
+  /** 盖戳当时的结论：磨到位 / 返工待确认 */
+  verdict: PolishVerdict;
+  /** 盖戳当时的操作人 */
+  operator: string;
+  /** 盖戳当时的日期（补磨日期优先） */
+  date: string | null;
+  /** 依据：补磨登记时盖戳，还是完成打磨放行时盖戳 */
+  source: 'touchUp' | 'finish';
+  /** 盖戳时间戳 */
+  stampedAt: number;
+}
 
 export interface Coat {
   id: string;
@@ -27,6 +49,8 @@ export interface Coat {
   state: CoatState;
   /** 荫房判定异常时回写的「待复检」标记 */
   needRecheck: boolean;
+  /** 打磨结论留档：补磨/放行当时写入，事后不再回头；null 表示尚未盖戳 */
+  polishStamp: CoatPolishStamp | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -91,5 +115,6 @@ export function createEmptyCoatDraft(bodyId: string, seq: number): CoatDraft {
     thicknessUm: 40,
     state: 'todo',
     needRecheck: false,
+    polishStamp: null,
   };
 }
